@@ -1,0 +1,131 @@
+#include <Arduino.h>
+
+// Definición de pines para el ESP32 (Ajusta según tu cableado)
+const int DOUT_PIN = 19;
+const int SCK_PIN = 18;
+
+// Constantes configurables de la sesión (Requisito 3)
+const float P_atm = 101.325; // kPa (Reemplazar por la presión atmosférica del día)
+const float V0 = 1.00;       // mL (Volumen inicial de la jeringa)
+const float Vm = 0.50;       // mL (Volumen muerto provisional, reemplazar tras Etapa B)
+const float P_max = 35.0;    // kPa (Presión máxima de seguridad)
+const int N = 20;            // Número constante de lecturas a promediar (N >= 20)
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(DOUT_PIN, INPUT);
+  pinMode(SCK_PIN, OUTPUT);
+  digitalWrite(SCK_PIN, LOW);
+
+  // Cálculo e impresión de la marca de parada Vj,min (Requisito 3)
+  float r = P_max / P_atm;
+  float Vj_min = (V0 - r * Vm) / (1.0 + r);
+  
+  Serial.println("--- Inicio de Sesión: Caracterización MPS20N0040D-D ---");
+  Serial.print("Marca de parada Vj,min: ");
+  Serial.print(Vj_min, 3);
+  Serial.println(" mL");
+  Serial.println("Ingrese datos en el monitor serie con el formato: ciclo,sentido,Vj");
+  Serial.println("Ejemplo de ingreso: 1,C,0.94 (Ciclo 1, Compresión, 0.94 mL)");
+  Serial.println("---------------------------------------------------------");
+}
+
+// Función para leer el HX710B según su hoja de datos (Requisito 1)
+long leerHX710B() {
+  while (digitalRead(DOUT_PIN) == HIGH) {
+    // Esperar hasta que DOUT baje, indicando que el dato está listo
+    yield(); 
+  }
+
+  long valor = 0;
+  for (int i = 0; i < 24; i++) {
+    digitalWrite(SCK_PIN, HIGH);
+    delayMicroseconds(1);
+    valor = valor << 1;
+    if (digitalRead(DOUT_PIN) == HIGH) {
+      valor++;
+    }
+    digitalWrite(SCK_PIN, LOW);
+    delayMicroseconds(1);
+  }
+
+  // Pulso 25 para terminar la lectura y preparar la siguiente conversión
+  digitalWrite(SCK_PIN, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(SCK_PIN, LOW);
+
+  // Extensión de signo para que el valor de 24 bits sea un entero con signo
+  if (valor & 0x800000) {
+    valor |= 0xFF000000;
+  }
+
+  return valor;
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    if (input.length() > 0) {
+      // Parsear la entrada separada por comas (Requisito 4)
+      int primeraComa = input.indexOf(',');
+      int segundaComa = input.indexOf(',', primeraComa + 1);
+
+      if (primeraComa > 0 && segundaComa > 0) {
+        int ciclo = input.substring(0, primeraComa).toInt();
+        String sentido = input.substring(primeraComa + 1, segundaComa);
+        float Vj = input.substring(segundaComa + 1).toFloat();
+
+        // Cálculo de Presión de Referencia - Ecuación (1)
+        float P_ref = P_atm * (V0 - Vj) / (Vj + Vm);
+
+        // Validaciones de seguridad (Requisito 4)
+        if (Vj > V0 || Vj <= 0) {
+          Serial.println("ADVERTENCIA: Volumen de jeringa inválido. Debe ser mayor a 0 y menor o igual a V0.");
+        } else if (P_ref > 40.0) {
+          Serial.println("ADVERTENCIA: La presión de referencia superó los 40 kPa. Riesgo de daño al sensor.");
+        } else {
+          
+          long suma = 0;
+          long lecturas[N];
+
+          // Toma de N lecturas (Requisito 2)
+          for (int i = 0; i < N; i++) {
+            lecturas[i] = leerHX710B();
+            suma += lecturas[i];
+            delay(20); // Ligero retardo para permitir la tasa de muestreo del sensor
+          }
+
+          float media = (float)suma / N;
+
+          // Cálculo de la desviación estándar (Requisito 2)
+          float sumaDiferenciasCuadradas = 0;
+          for (int i = 0; i < N; i++) {
+            sumaDiferenciasCuadradas += pow(lecturas[i] - media, 2);
+          }
+          float desviacionEstandar = sqrt(sumaDiferenciasCuadradas / (N - 1));
+
+          // Imprimir línea delimitada por comas (Requisito 5)
+          // Formato: ciclo, sentido, Vj, Pref, media, desviacion_estandar, N
+          Serial.print(ciclo);
+          Serial.print(",");
+          Serial.print(sentido);
+          Serial.print(",");
+          Serial.print(Vj, 2);
+          Serial.print(",");
+          Serial.print(P_ref, 3);
+          Serial.print(",");
+          Serial.print(media, 2);
+          Serial.print(",");
+          Serial.print(desviacionEstandar, 2);
+          Serial.print(",");
+          Serial.println(N);
+        }
+      } else {
+        Serial.println("Error de formato. Por favor use: ciclo,sentido,Vj");
+      }
+    }
+  }
+}
+
